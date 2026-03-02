@@ -14,6 +14,8 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
 
       - name: Configure Git
         run: |
@@ -21,15 +23,14 @@ jobs:
           git config user.email "chunjinchen1998@gmail.com"
 
       - name: Fetch Upstream Changes
-        continue-on-error: true
         run: |
           git fetch origin
-          git checkout master 
-          git remote add upstream https://github.com/ACL4SSR/ACL4SSR.git
+          git checkout -B master origin/master
+          git remote add upstream https://github.com/ACL4SSR/ACL4SSR.git || true
           git fetch upstream
-          git rebase upstream/master 
-          # 先将合并后的结果提交到远程
-          git push origin master
+          # Always align fork base with upstream to avoid rebase conflicts in CI.
+          git reset --hard upstream/master
+          git push --force-with-lease origin master
 
       - name: Start Convert
         id: convert
@@ -84,7 +85,11 @@ jobs:
           if [ "$status" == "fail" ]; then
             exit 0
           else  
-            git add .  
+            git add .
+            if git diff --cached --quiet; then
+              echo "No changes to commit"
+              exit 0
+            fi
             git commit -m "Daily update: $(date +'%Y-%m-%d')"
             git push origin master
           fi
