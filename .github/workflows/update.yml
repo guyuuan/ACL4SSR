@@ -111,25 +111,4 @@ jobs:
             exit 0
           fi
 
-          git push origin master
-
-      - name: Send Conflict Mail
-        if: steps.sync_upstream.outputs.SYNC_RESULT == 'conflict'
-        uses: dawidd6/action-send-mail@v3
-        with:
-          server_address: ${{ secrets.SMTP_SERVER }}
-          server_port: ${{ secrets.SMTP_PORT }}
-          username: ${{ secrets.SMTP_USERNAME }}
-          password: ${{ secrets.SMTP_PASSWORD }}
-          subject: "[ACL4SSR] Fork sync failed due to merge conflict"
-          to: chunjinchen1998@gmail.com
-          from: ${{ secrets.SMTP_FROM || secrets.SMTP_USERNAME }}
-          body: |
-            GitHub Actions detected a merge conflict while syncing upstream/master into this fork's master branch.
-
-            The workflow aborted this sync to avoid overwriting fork-specific changes.
-            No fork changes were discarded and nothing was pushed in this run.
-
-            Repository: ${{ github.repository }}
-            Workflow: ${{ github.workflow }}
-            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          git push origin master
