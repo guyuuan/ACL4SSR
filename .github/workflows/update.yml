@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
   schedule:
-    - cron: "0 0 * * *"  # 每天 UTC 时间 00:00 触发，可根据需求调整触发时间
+    - cron: "0 0 * * *"
 
 jobs:
   update_fork:
@@ -13,7 +13,7 @@ jobs:
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -22,74 +22,114 @@ jobs:
           git config user.name "guyuuan"
           git config user.email "chunjinchen1998@gmail.com"
 
-      - name: Fetch Upstream Changes
+      - name: Merge Upstream Changes
+        id: sync_upstream
+        shell: bash
         run: |
-          git fetch origin
+          set -euo pipefail
+
+          git fetch origin master
           git checkout -B master origin/master
-          git remote add upstream https://github.com/ACL4SSR/ACL4SSR.git || true
-          git fetch upstream
-          # Always align fork base with upstream to avoid rebase conflicts in CI.
-          git reset --hard upstream/master
-          git push --force-with-lease origin master
+          git remote add upstream https://github.com/ACL4SSR/ACL4SSR.git 2>/dev/null || true
+          git remote set-url upstream https://github.com/ACL4SSR/ACL4SSR.git
+          git fetch upstream master
+
+          if git merge --no-ff --no-edit upstream/master; then
+            if git diff --quiet origin/master...HEAD; then
+              echo "SYNC_RESULT=noop" >> "$GITHUB_OUTPUT"
+            else
+              echo "SYNC_RESULT=success" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            git merge --abort || true
+            echo "SYNC_RESULT=conflict" >> "$GITHUB_OUTPUT"
+            echo "Upstream merge conflict detected. This run will stop without changing the fork."
+          fi
 
       - name: Start Convert
+        if: steps.sync_upstream.outputs.SYNC_RESULT != 'conflict'
         id: convert
+        shell: bash
         run: |
-          pushd ./Clash/config || return 1
+          set -euo pipefail
+
+          pushd ./Clash/config >/dev/null
           count=0
-          # 使用find命令递归查找当前目录及其子目录下的所有文件，但排除.sh和.md文件
           mapfile -d '' file_list < <(find . -type f -not -name '*.sh' -not -path './.*/*' -not -name '*.md' -print0)
-          # 遍历文件列表
-          #while IFS= read -r -d '' file; do
+
           for file in "${file_list[@]}"; do
-            # 使用sed命令进行替换，并将结果写回原文件,并返回是否替换成功的状态码
-            c=$(sed -n 's|https://raw\.githubusercontent\.com/ACL4SSR/ACL4SSR/master|https://cdn\.jsdelivr\.net/gh/guyuuan/ACL4SSR@master|gp' "$file" | sed -n '=' | wc -l )
+            c=$(sed -n 's|https://raw\.githubusercontent\.com/ACL4SSR/ACL4SSR/master|https://cdn\.jsdelivr\.net/gh/guyuuan/ACL4SSR@master|gp' "$file" | sed -n '=' | wc -l)
             sed -i 's|https://raw\.githubusercontent\.com/ACL4SSR/ACL4SSR/master|https://cdn\.jsdelivr\.net/gh/guyuuan/ACL4SSR@master|g' "$file"
-            if [ $c -gt 0 ]; then
-              count=$( expr $count + $c)
-              echo "替换成功[$count,$c]: $file"
+            if [ "$c" -gt 0 ]; then
+              count=$((count + c))
+              echo "Replaced [$count,$c]: $file"
             fi
           done
-          echo "替换总数: ${count}"
-          # 如果sum大于0返回success，否则返回fail
-          if [ ${count} -gt 0 ]; then
-            echo "success"
+
+          popd >/dev/null
+          echo "Total replacements: ${count}"
+
+          if [ "$count" -gt 0 ]; then
             echo "CONVERT_RESULT=success" >> "$GITHUB_OUTPUT"
           else
             echo "CONVERT_RESULT=fail" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Commit Changes
-        env: 
+        if: steps.sync_upstream.outputs.SYNC_RESULT != 'conflict'
+        env:
           CONVERT_RESULT: ${{ steps.convert.outputs.CONVERT_RESULT }}
+        shell: bash
         run: |
-          #!/bin/bash
-          # 定义一个处理异常的函数
-          handle_error() {
-            e=$?
-            echo "发生异常，退出状态码：$e"
-            if [ $e -eq 1 ]; then
-              exit 0
-            else
-              exit 1
-            fi
-          }
-          
-          # 捕获异常并调用处理函数
-          trap handle_error ERR
-          
-          set -e
-          # 获取上一个步骤（convert）的输出
-          status=$CONVERT_RESULT
+          set -euo pipefail
+
+          status="${CONVERT_RESULT:-fail}"
           echo "status: $status"
-          if [ "$status" == "fail" ]; then
+
+          git add .
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
             exit 0
-          else  
-            git add .
-            if git diff --cached --quiet; then
-              echo "No changes to commit"
-              exit 0
-            fi
-            git commit -m "Daily update: $(date +'%Y-%m-%d')"
-            git push origin master
           fi
+
+          if [ "$status" = "success" ]; then
+            git commit -m "Daily update: $(date +'%Y-%m-%d')"
+          else
+            git commit -m "Merge upstream updates: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+          fi
+
+      - name: Push Changes
+        if: steps.sync_upstream.outputs.SYNC_RESULT != 'conflict'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git fetch origin master
+          if git diff --quiet origin/master...HEAD; then
+            echo "No new commits to push"
+            exit 0
+          fi
+
+          git push origin master
+
+      - name: Send Conflict Mail
+        if: steps.sync_upstream.outputs.SYNC_RESULT == 'conflict'
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_SERVER }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          subject: "[ACL4SSR] Fork sync failed due to merge conflict"
+          to: chunjinchen1998@gmail.com
+          from: ${{ secrets.SMTP_FROM || secrets.SMTP_USERNAME }}
+          body: |
+            GitHub Actions detected a merge conflict while syncing upstream/master into this fork's master branch.
+
+            The workflow aborted this sync to avoid overwriting fork-specific changes.
+            No fork changes were discarded and nothing was pushed in this run.
+
+            Repository: ${{ github.repository }}
+            Workflow: ${{ github.workflow }}
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
